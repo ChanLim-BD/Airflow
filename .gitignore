@@ -1,0 +1,5 @@
+venv
+README.md
+.env
+github token.txt
+/dags/dags/
