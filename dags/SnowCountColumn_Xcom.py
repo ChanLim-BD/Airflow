@@ -7,8 +7,6 @@ from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.python_operator import PythonOperator
 
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
-# from airflow.contrib.hooks.snowflake_hook import SnowflakeHook
-# from airflow.contrib.operators.snowflake_operator import SnowflakeOperator
 
 
 CountColumns = f'''SELECT COUNT(*)
@@ -27,7 +25,7 @@ def get_snowflake_column_count(**kwargs):
 
     # 결과를 변수에 저장
     count_result = result[0]  # 첫 번째 열의 값을 가져옴
-    kwargs['ti'].xcom_push(key='count_result_variable', value=count_result)
+    kwargs['ti'].xcom_push(key='prev', value=count_result)
 
 
 
