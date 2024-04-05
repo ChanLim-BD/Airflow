@@ -1,7 +1,7 @@
 import warnings
 warnings.filterwarnings(action = "ignore")
 
-from airflow.models import DAG, Variable
+from airflow.models import DAG
 from datetime import datetime, timedelta
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
