@@ -3,28 +3,20 @@ warnings.filterwarnings(action = "ignore")
 
 import io
 import boto3
-import pyarrow.parquet as pq
-from datetime import datetime, timedelta
 
 from airflow.models import DAG
-from airflow.contrib.hooks.aws_hook import AwsHook
-from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+from datetime import datetime, timedelta
+
 
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
 from airflow.contrib.operators.snowflake_operator import SnowflakeOperator
 
-#############################################################################
-AWS_HOOK = AwsHook('chan-aws')
-CREDENTIALS = AWS_HOOK.get_credentials()
-S3Client = boto3.client('s3',
-                          aws_access_key_id = CREDENTIALS.access_key,
-                          aws_secret_access_key = CREDENTIALS.secret_key,
-                          region_name = "ap-northeast-2"
-)
-#############################################################################
+from airflow.contrib.hooks.aws_hook import AwsHook
+from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 
-#############################################################################
+
+
 DynamicCreate = f'''CREATE OR REPLACE DYNAMIC TABLE DTABLETEST
                         TARGET_LAG = '1 minutes'
                         WAREHOUSE = COMPUTE_WH
@@ -43,25 +35,6 @@ CountDynamicColumns = f'''SELECT COUNT(*)
                 WHERE TABLE_SCHEMA = 'PUBLIC'
                     AND TABLE_NAME = 'DTABLETEST';
             ''' 
-#############################################################################
-
-
-def read_parquet_and_print_columns(**kwargs):
-    bucket_name = 'chan-cdc-test'
-    key = 'air/ADMIN/CHLEE_TEST/LOAD00000001.parquet'
-    response = S3Client.get_object(Bucket=bucket_name, Key=key)
-    parquet_file = response['Body']
-
-    parquet_file_obj = io.BytesIO(parquet_file.read())
-    parquet_table = pq.read_table(parquet_file_obj)
-
-    parquet_schema = parquet_table.schema
-    columns = parquet_table.column_names
-    print("Columns in the Parquet file:")
-    for column in columns:
-        print(column)
-    print("Columns in the Parquet file Count:")
-    print(len(parquet_schema))
 
 
 def get_column_count(**kwargs):
@@ -87,7 +60,7 @@ def check_if_table_needs_recreation(**kwargs):
     else:
         return "no_action_task"
 
-#############################################################################
+
 
 DEFAULT_ARGS = {
     'owner': 'airflow',
@@ -105,11 +78,6 @@ with DAG(
     _task_start = DummyOperator(
         task_id = 'Task_Start',
     ) 
-
-    read_and_print_columns = PythonOperator(
-        task_id='read_and_print_columns',
-        python_callable=read_parquet_and_print_columns
-    )
 
     get_column_count_task = PythonOperator(
         task_id='get_column_count',
@@ -134,3 +102,6 @@ with DAG(
     
     _task_start  >> get_column_count_task >> check_table_task
     check_table_task >> [recreate_table_task, no_action_task]
+
+
+    
