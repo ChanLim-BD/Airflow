@@ -36,6 +36,17 @@ CreateOrigin = f'''CREATE TABLE IF NOT EXISTS ORIGIN_TEST
                         ));
             ''' 
 
+
+CopyIntoOrigin = f'''ALTER TABLE ORIGIN_TEST SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+                    COPY INTO ORIGIN_TEST
+                    FROM @AIR_STAGE
+                    FILE_FORMAT = my_csv_load_format
+                    MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+                    ALTER TABLE ORIGIN_TEST SET ENABLE_SCHEMA_EVOLUTION = False;
+                '''
+
 CountOriginColumns = f'''SELECT COUNT(*)
                 FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_SCHEMA = 'AIR_SCHEMA'
@@ -51,9 +62,19 @@ DEFAULT_ARGS = {
     'retries': 1
 }
 
+def check_s3_file_count():
+    bucket_name = 'chan-cdc-test'
+    prefix = '/air/dt/'
+    keys = s3.list_keys(bucket_name=bucket_name, prefix=prefix)
+
+    if len(keys) == 1:
+        return True
+    else:
+        return False
+    
 
 def read_CSV_and_save_columns(**kwargs):
-    S3keys = kwargs['ti'].xcom_pull(task_ids="list_3s_files")
+    S3keys = kwargs['ti'].xcom_pull(task_ids="List_S3_files_Task")
     num_keys = len(S3keys)
     num_files = 0
     bucket_name = 'chan-cdc-test'
@@ -77,9 +98,9 @@ def check_origin_table():
     result = snowflake_hook.get_first(f"SHOW TABLES LIKE 'ORIGIN_TEST';")
 
     if result:
-        return "save_origin_info_task"
+        return "Save_Origin_Columns_Task"
     else:
-        return "init_origin_table_task"
+        return "Init_Origin_Table_Task"
 
 
 def save_origin_info(**kwargs):
@@ -98,37 +119,34 @@ def save_origin_info(**kwargs):
 
 def check_if_table_needs_recreation(**kwargs):
     ti = kwargs['ti']
-    num_files = ti.xcom_pull(task_ids='read_and_save_columns_task', key='num_files')
-    S3_Column_count = ti.xcom_pull(task_ids='read_and_save_columns_task', key='column_count_' + str(num_files))
+    num_files = ti.xcom_pull(task_ids='Read_and_Save_Columns_Task', key='num_files')
+    S3_Column_count = ti.xcom_pull(task_ids='Read_and_Save_Columns_Task', key='column_count_' + str(num_files))
 
-    origin_column_count = ti.xcom_pull(task_ids='save_origin_info_task', key='origin_column_count')
+    origin_column_count = ti.xcom_pull(task_ids='Save_Origin_Columns_Task', key='origin_column_count')
 
     if S3_Column_count == origin_column_count:
-        return "Task_eq"
+        return "Column_Count_Equal_Task"
     elif S3_Column_count > origin_column_count:
-        return "Task_hi"
+        return "S3_Columns_Higher_Task"
     else:
-        return "Task_lo"
+        return "S3_Columns_Lower_Task"
+    
     
 def check_column_list(**kwargs):
     ti = kwargs['ti']
-    num_files = ti.xcom_pull(task_ids='read_and_save_columns_task', key='num_files')
-    S3_Columns = ti.xcom_pull(task_ids='read_and_save_columns_task', key='columns_list_' + str(num_files))
+    num_files = ti.xcom_pull(task_ids='Read_and_Save_Columns_Task', key='num_files')
+    S3_Columns = ti.xcom_pull(task_ids='Read_and_Save_Columns_Task', key='columns_list_' + str(num_files))
 
-    origin_columns = ti.xcom_pull(task_ids='save_origin_info_task', key='origin_column_list')
-
-    print(S3_Columns)
-    print(origin_columns)
+    origin_columns = ti.xcom_pull(task_ids='Save_Origin_Columns_Task', key='origin_column_list')
 
     if set(S3_Columns) == set(origin_columns):
         return "Task_perfect"
     else:
-        return "Task_not_same_kind"
+        return "Task_not_same_column_kind"
 
-    
 
 with DAG(
-    dag_id = 'Temp',
+    dag_id = 'S3_to_Snowflake_Origin_Table',
     default_args=DEFAULT_ARGS,
     schedule_interval='@once',
     catchup=False
@@ -138,7 +156,7 @@ with DAG(
     )
 
     s3_file_task = S3ListOperator(
-    task_id="list_3s_files",
+    task_id="List_S3_files_Task",
     bucket="chan-cdc-test",
     prefix="air/dt/",
     delimiter="/",
@@ -146,62 +164,79 @@ with DAG(
     )
 
     read_and_save_columns_task = PythonOperator(
-        task_id='read_and_save_columns_task',
+        task_id='Read_and_Save_Columns_Task',
         python_callable=read_CSV_and_save_columns
     )
 
-
     check_origin_table_task = BranchPythonOperator(
-        task_id='check_origin_table_task',
+        task_id='Check_Origin_Table_Task',
         python_callable=check_origin_table,
     )
 
     save_origin_info_task = PythonOperator(
-        task_id='save_origin_info_task',
+        task_id='Save_Origin_Columns_Task',
         python_callable=save_origin_info,
     )   
 
     init_origin_table_task = SnowflakeOperator(
-        task_id='init_origin_table_task',
+        task_id='Init_Origin_Table_Task',
         sql=CreateOrigin,
         snowflake_conn_id='chan_snow'
     )
 
     check_S3_and_origin_columns_task = BranchPythonOperator(
-        task_id='check_S3_and_origin_columns_task',
+        task_id='Check_S3_and_Origin_Columns_Task',
         python_callable=check_if_table_needs_recreation,
     )
 
-    task_equal = BranchPythonOperator(
-        task_id = 'Task_eq',
+    column_count_equal = BranchPythonOperator(
+        task_id = 'Column_Count_Equal_Task',
         python_callable=check_column_list,
     )
 
-    _task_higher = DummyOperator(
-        task_id = 'Task_hi',
+    S3_Columns_Higher = SnowflakeOperator(
+        task_id = 'S3_Columns_Higher_Task',
+        sql=CopyIntoOrigin,
+        snowflake_conn_id='chan_snow'
     )
 
-    _task_lower = DummyOperator(
-        task_id = 'Task_lo',
+    S3_Columns_Lower = DummyOperator(
+        task_id = 'S3_Columns_Lower_Task',
     )
 
-    task_perfect_same = DummyOperator(
+    task_perfect_same = SnowflakeOperator(
         task_id = 'Task_perfect',
+        sql=CopyIntoOrigin,
+        snowflake_conn_id='chan_snow'
     )
 
-    task_not_same_kind = DummyOperator(
-        task_id = 'Task_not_same_kind',
+    task_not_same_column_kind = DummyOperator(
+        task_id = 'Task_not_same_column_kind',
     )
 
-    _task_end = DummyOperator(
-        task_id = 'Task_End',
+
+    _init_origin_task_end = DummyOperator(
+        task_id = 'Init_Origin_Task_End',
+    )
+
+    _perfect_task_end = DummyOperator(
+        task_id = 'Perfect_Task_End',
+    )
+
+    _not_same_column_task_end = DummyOperator(
+        task_id = 'Not_Same_Column_Task_End',
+    )
+
+    _s3_higher_task_end = DummyOperator(
+        task_id = 'S3_Higher_Task_End',
     )
 
     _task_start >> s3_file_task >> read_and_save_columns_task >> check_origin_table_task
     check_origin_table_task >> [save_origin_info_task, init_origin_table_task]
-    init_origin_table_task >> _task_end
+    init_origin_table_task >> _init_origin_task_end
     save_origin_info_task >> check_S3_and_origin_columns_task
-    check_S3_and_origin_columns_task >> [task_equal, _task_higher, _task_lower]
-    task_equal >> [task_perfect_same, task_not_same_kind]
-    task_perfect_same >> _task_end
-    task_not_same_kind >> _task_end
+    check_S3_and_origin_columns_task >> [column_count_equal, S3_Columns_Higher, S3_Columns_Lower]
+    column_count_equal >> [task_perfect_same, task_not_same_column_kind]
+    task_perfect_same >> _perfect_task_end
+    task_not_same_column_kind >> _not_same_column_task_end
+    S3_Columns_Higher >> _s3_higher_task_end
